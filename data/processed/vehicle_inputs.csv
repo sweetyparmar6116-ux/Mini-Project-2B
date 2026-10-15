@@ -1,0 +1,3 @@
+vehicle_id,capacity_kg,fuel_type,base_kmpl
+V1,5000,diesel,5.0
+V2,2000,diesel,8.0
