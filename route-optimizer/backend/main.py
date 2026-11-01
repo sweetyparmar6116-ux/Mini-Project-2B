@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 import engine
+import traffic_service
 
 
 # ============================================================
@@ -72,6 +73,14 @@ class RouteRequest(BaseModel):
 
     vehicle_efficiency: Optional[float] = None
     energy_price: Optional[float] = None
+
+
+class RouteTrafficRequest(BaseModel):
+    coordinates: list[tuple[float, float]] = Field(
+        ...,
+        min_length=2,
+        max_length=100,
+    )
 
 
 # ============================================================
@@ -260,8 +269,10 @@ async def route(request: RouteRequest):
         "lat": destination_coordinates[0],
         "lon": destination_coordinates[1],
     },
-    "routing_objective": "shortest_road_distance",
-    "data_status": "OSM road-network data with estimated traffic and risk",
+    "data_status": (
+        "OSM road-network data with live traffic when available and "
+        "estimated risk"
+    ),
 }
 
     except ValueError as exc:
@@ -277,3 +288,49 @@ async def route(request: RouteRequest):
             status_code=500,
             detail=f"Route calculation failed: {exc}",
         ) from exc
+
+
+@app.post("/traffic")
+async def route_traffic(request: RouteTrafficRequest):
+    for latitude, longitude in request.coordinates:
+        if not (-90 <= latitude <= 90):
+            raise HTTPException(
+                status_code=422,
+                detail="Latitude must be between -90 and 90.",
+            )
+        if not (-180 <= longitude <= 180):
+            raise HTTPException(
+                status_code=422,
+                detail="Longitude must be between -180 and 180.",
+            )
+
+    segments = await asyncio.to_thread(
+        traffic_service.get_route_traffic,
+        request.coordinates,
+    )
+    updated_at = max(
+        (
+            segment["updated_at"]
+            for segment in segments
+            if segment.get("updated_at")
+        ),
+        default=None,
+    )
+
+    return {
+        "available": bool(segments),
+        "source": "TomTom Live Traffic" if segments else None,
+        "updated_at": updated_at,
+        "segments": segments,
+        "message": (
+            None
+            if segments
+            else (
+                "Configure TOMTOM_API_KEY in backend/.env to enable live "
+                "traffic."
+                if not traffic_service.TOMTOM_API_KEY
+                else "TomTom returned no live traffic readings. Check the "
+                "API key, account quota, and network connection."
+            )
+        ),
+    }

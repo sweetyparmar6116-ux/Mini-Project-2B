@@ -1041,6 +1041,7 @@ def route_metrics(graph, path):
 
     live_speeds = []
     live_traffic_values = []
+    live_traffic_segments = []
 
     # Sample a maximum of 3 road segments for live traffic
     if edges:
@@ -1063,6 +1064,22 @@ def route_metrics(graph, path):
                     live_speeds.append(speed)
                 if traffic is not None:
                     live_traffic_values.append(traffic)
+                    live_traffic_segments.append({
+                        "coordinates": (
+                            live_data.get("coordinates")
+                            or _path_to_coordinates(graph, [u, v])
+                        ),
+                        "traffic": traffic,
+                        "current_speed": speed,
+                        "free_flow_speed": live_data.get(
+                            "free_flow_speed"
+                        ),
+                        "road_closure": live_data.get(
+                            "road_closure", False
+                        ),
+                        "source": live_data.get("source"),
+                        "updated_at": live_data.get("updated_at"),
+                    })
 
     average_live_speed = (
         sum(live_speeds) / len(live_speeds)
@@ -1098,6 +1115,16 @@ def route_metrics(graph, path):
         "cost": cost,
         "traffic": traffic_total / edge_count if edge_count else 0.0,
         "risk": risk_total / edge_count if edge_count else 0.0,
+        "live_traffic_segments": live_traffic_segments,
+        "traffic_is_live": bool(live_traffic_segments),
+        "traffic_updated_at": max(
+            (
+                segment["updated_at"]
+                for segment in live_traffic_segments
+                if segment["updated_at"]
+            ),
+            default=None,
+        ),
     }
 
 # ============================================================
@@ -1441,7 +1468,7 @@ def find_best_route(
         route_name = "Weather-Aware Recommended Route"
         selection_preference = "multi_factor_weather"
         algorithm_name = (
-            "Distance + weather-adjusted time + weather risk"
+            "Distance + time + traffic + weather"
         )
         weather_status = (
             "Forecast data was used to compare candidate routes. "
@@ -1450,7 +1477,7 @@ def find_best_route(
     else:
         route_name = "Recommended Route (Weather Unavailable)"
         selection_preference = "distance_time_fallback"
-        algorithm_name = "Distance + estimated time scoring"
+        algorithm_name = "Distance + time + traffic"
         weather_status = (
             "Weather data was unavailable for at least one candidate. "
             "Weather was excluded from route selection."
@@ -1575,7 +1602,11 @@ def find_best_route(
             "risk": round(metrics["risk"], 3),
             "coordinates": candidate["coordinates"],
             "path": candidate["coordinates"],
+            "live_traffic_segments": metrics["live_traffic_segments"],
+            "traffic_is_live": metrics["traffic_is_live"],
+            "traffic_updated_at": metrics["traffic_updated_at"],
             "selection_score": candidate["selection_score"],
+            "normalized_scores": candidate["normalized_scores"],
             "weather": candidate["weather"],
             "weather_risk": candidate["weather_risk"],
             "is_recommended": is_selected,
@@ -1598,6 +1629,18 @@ def find_best_route(
         "weather": selected_weather,
         "weather_available": weather_available,
         "weather_status": weather_status,
+        "live_traffic_available": selected_metrics["traffic_is_live"],
+        "traffic_source": (
+            "TomTom Live Traffic"
+            if selected_metrics["traffic_is_live"]
+            else None
+        ),
+        "traffic_updated_at": selected_metrics["traffic_updated_at"],
+        "traffic_message": (
+            None
+            if selected_metrics["traffic_is_live"]
+            else "Fetching a fresh live traffic update."
+        ),
         "candidate_count": len(candidates),
         "candidate_comparison": candidate_comparison,
         "vehicle_cost_per_km": vehicle_cost_per_km(

@@ -13,8 +13,15 @@ import "leaflet/dist/leaflet.css";
 import "./App.css";
 
 const API = "http://localhost:8000";
+const MIN_TRAFFIC_OVERLAY_SLOWDOWN = 0.08;
 const REVERSE_GEOCODING_API =
   "https://nominatim.openstreetmap.org/reverse";
+const selectionFactorLabels = {
+  distance: "Distance",
+  time: "Estimated travel time",
+  traffic: "Traffic",
+  weather: "Weather risk",
+};
 
 const pin = (letter, cls) =>
   L.divIcon({
@@ -98,16 +105,13 @@ function formatWeather(weather, fallback) {
   return summary || (weather.available ? "Forecast available" : fallback);
 }
 
-// Normalize route coordinates and metrics from the backend.
-function normalizeRoute(route) {
-  let rawCoordinates =
-    route.coords ??
-    route.coordinates ??
-    route.path ??
-    route.geometry ??
-    [];
+function formatTrafficUpdatedAt(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString();
+}
 
-  // Support GeoJSON geometry: [longitude, latitude].
+function normalizeCoordinates(rawCoordinates) {
   if (
     rawCoordinates &&
     !Array.isArray(rawCoordinates) &&
@@ -120,7 +124,7 @@ function normalizeRoute(route) {
     );
   }
 
-  const coords = Array.isArray(rawCoordinates)
+  return Array.isArray(rawCoordinates)
     ? rawCoordinates
         .map((point) => {
           if (Array.isArray(point) && point.length >= 2) {
@@ -131,14 +135,12 @@ function normalizeRoute(route) {
             const lat = Number(
               point.lat ?? point.latitude ?? point.y
             );
-
             const lon = Number(
               point.lon ??
               point.lng ??
               point.longitude ??
               point.x
             );
-
             return [lat, lon];
           }
 
@@ -155,10 +157,49 @@ function normalizeRoute(route) {
             point[1] <= 180
         )
     : [];
+}
+
+function downsampleCoordinates(coords, maxPoints = 100) {
+  if (coords.length <= maxPoints) return coords;
+
+  return Array.from({ length: maxPoints }, (_, index) => {
+    const sourceIndex = Math.round(
+      (index * (coords.length - 1)) / (maxPoints - 1)
+    );
+    return coords[sourceIndex];
+  });
+}
+
+// Normalize route coordinates and metrics from the backend.
+function normalizeRoute(route) {
+  const rawCoordinates =
+    route.coords ??
+    route.coordinates ??
+    route.path ??
+    route.geometry ??
+    [];
+  const coords = normalizeCoordinates(rawCoordinates);
+  const liveTrafficSegments = Array.isArray(
+    route.live_traffic_segments
+  )
+    ? route.live_traffic_segments
+        .map((segment) => ({
+          ...segment,
+          coords: normalizeCoordinates(
+            segment.coordinates ?? segment.coords
+          ),
+        }))
+        .filter(
+          (segment) =>
+            segment.coords.length >= 2 &&
+            Number.isFinite(Number(segment.traffic))
+        )
+    : [];
 
   return {
     ...route,
     coords,
+    live_traffic_segments: liveTrafficSegments,
     distance_km: Number(
       route.distance_km ??
       route.distanceKm ??
@@ -437,6 +478,26 @@ export default function App() {
 
   // Avoid applying an old address lookup after a newer location request.
   const locationRequestRef = useRef(0);
+  const trafficPollingRef = useRef(null);
+  const trafficRequestRef = useRef(0);
+
+  useEffect(
+    () => () => {
+      trafficRequestRef.current += 1;
+      if (trafficPollingRef.current) {
+        clearInterval(trafficPollingRef.current);
+      }
+    },
+    []
+  );
+
+  function stopTrafficRefresh() {
+    trafficRequestRef.current += 1;
+    if (trafficPollingRef.current) {
+      clearInterval(trafficPollingRef.current);
+      trafficPollingRef.current = null;
+    }
+  }
 
   const routes = useMemo(() => {
     if (!Array.isArray(data?.routes)) return [];
@@ -481,6 +542,8 @@ export default function App() {
     setLoading(true);
     setError("");
     setData(null);
+    stopTrafficRefresh();
+    const trafficRequestId = trafficRequestRef.current;
 
     try {
       const response = await fetch(`${API}/route`, {
@@ -545,6 +608,100 @@ export default function App() {
       });
 
       setFitSignal((value) => value + 1);
+
+      const selectedRouteIndex =
+        mappedBestIndex >= 0 ? mappedBestIndex : 0;
+      const selectedRoute = usableRoutes[selectedRouteIndex];
+      let trafficRefreshInProgress = false;
+      const updateTraffic = async () => {
+        if (trafficRefreshInProgress) return;
+        trafficRefreshInProgress = true;
+
+        try {
+          const trafficResponse = await fetch(`${API}/traffic`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              coordinates: downsampleCoordinates(selectedRoute.coords),
+            }),
+          });
+          const trafficResult = await trafficResponse.json();
+
+          if (!trafficResponse.ok) {
+            throw new Error(
+              typeof trafficResult.detail === "string"
+                ? trafficResult.detail
+                : "Live traffic could not be refreshed."
+            );
+          }
+          if (trafficRequestRef.current !== trafficRequestId) return;
+
+          const trafficSegments = normalizeRoute({
+            live_traffic_segments: trafficResult.segments,
+          }).live_traffic_segments;
+
+          setData((current) => {
+            if (!current) return current;
+            return {
+              ...current,
+              live_traffic_available: trafficResult.available,
+              traffic_source: trafficResult.source,
+              traffic_updated_at: trafficResult.updated_at,
+              traffic_message: trafficResult.message,
+              traffic_refresh_error: "",
+              routes: current.routes.map((route, index) =>
+                index === selectedRouteIndex
+                  ? {
+                      ...route,
+                      live_traffic_segments: trafficSegments,
+                      traffic_is_live: trafficResult.available,
+                      traffic_updated_at: trafficResult.updated_at,
+                      traffic: trafficSegments.length
+                        ? trafficSegments.reduce(
+                            (total, segment) =>
+                              total + Number(segment.traffic),
+                            0
+                          ) / trafficSegments.length
+                        : route.traffic,
+                    }
+                  : route
+              ),
+            };
+          });
+        } catch (trafficError) {
+          if (trafficRequestRef.current !== trafficRequestId) return;
+
+          setData((current) => {
+            if (!current) return current;
+            return {
+              ...current,
+              live_traffic_available: false,
+              traffic_source: null,
+              traffic_updated_at: null,
+              traffic_message: "",
+              traffic_refresh_error: trafficError.message,
+              routes: current.routes.map((route, index) =>
+                index === selectedRouteIndex
+                  ? {
+                      ...route,
+                      live_traffic_segments: [],
+                      traffic_is_live: false,
+                      traffic_updated_at: null,
+                    }
+                  : route
+              ),
+            };
+          });
+        } finally {
+          trafficRefreshInProgress = false;
+        }
+      };
+
+      void updateTraffic();
+      trafficPollingRef.current = setInterval(
+        updateTraffic,
+        60_000
+      );
     } catch (err) {
       setError(
         err.message === "Failed to fetch"
@@ -558,6 +715,7 @@ export default function App() {
 
   // Get GPS coordinates, then look up a readable address.
   function useMyLocation() {
+    stopTrafficRefresh();
     setError("");
 
     if (!navigator.geolocation) {
@@ -645,6 +803,7 @@ export default function App() {
   }
 
   function swap() {
+    stopTrafficRefresh();
     setSource(destination);
     setDestination(source);
     setError("");
@@ -677,11 +836,16 @@ const deadEnds = Array.isArray(data?.dead_ends)
   ? data.dead_ends
   : [];
 
-  const selectionExplanation = data
-    ? data.weather_available
-      ? "Selected using distance, estimated travel time, and weather data when comparing candidate routes."
-      : "Selected using distance and estimated travel time because usable weather data was unavailable."
-    : "";
+  const selectionFactors = Object.entries(data?.weights ?? {})
+    .filter(([factor, weight]) =>
+      selectionFactorLabels[factor] && Number(weight) > 0
+    )
+    .map(([factor, weight]) => ({
+      key: factor,
+      label: selectionFactorLabels[factor],
+      weight: Number(weight),
+      score: Number(recommendation?.normalized_scores?.[factor]),
+    }));
 
   return (
     <div className="app">
@@ -729,7 +893,11 @@ const deadEnds = Array.isArray(data?.dead_ends)
           <PlaceInput
             label="From"
             place={source}
-            onPlace={setSource}
+            onPlace={(place) => {
+              stopTrafficRefresh();
+              setData(null);
+              setSource(place);
+            }}
             onEnter={find}
             extra={
               <button
@@ -757,7 +925,11 @@ const deadEnds = Array.isArray(data?.dead_ends)
           <PlaceInput
             label="To"
             place={destination}
-            onPlace={setDestination}
+            onPlace={(place) => {
+              stopTrafficRefresh();
+              setData(null);
+              setDestination(place);
+            }}
             onEnter={find}
           />
 
@@ -799,7 +971,66 @@ const deadEnds = Array.isArray(data?.dead_ends)
             <div className="panel">
               <h3>★ Recommended Route</h3>
 
-              <p className="hint">{selectionExplanation}</p>
+              <p className="hint">
+                Chosen from {data.candidate_count ?? routes.length} candidate
+                routes using the weighted criteria below. The lowest total
+                score wins.
+              </p>
+
+              <div className="selection-breakdown">
+                <div className="selection-score">
+                  <span>Selection score</span>
+                  <strong>
+                    {Number.isFinite(Number(recommendation.selection_score))
+                      ? Number(recommendation.selection_score).toFixed(4)
+                      : "N/A"}
+                  </strong>
+                  <small>Lower is better</small>
+                </div>
+
+                <div className="selection-factors">
+                  {selectionFactors.map((factor) => {
+                    const hasScore = Number.isFinite(factor.score);
+                    const relativeQuality = hasScore
+                      ? Math.max(0, Math.min(1, 1 - factor.score))
+                      : 0;
+
+                    return (
+                      <div
+                        className="selection-factor"
+                        key={factor.key}
+                      >
+                        <div className="selection-factor-heading">
+                          <strong>{factor.label}</strong>
+                          <span>{Math.round(factor.weight * 100)}% weight</span>
+                        </div>
+                        <div
+                          className="selection-factor-meter"
+                          role="img"
+                          aria-label={`${factor.label}: ${Math.round(
+                            factor.weight * 100
+                          )}% weight, ${
+                            hasScore
+                              ? `relative score ${factor.score.toFixed(2)} out of 1, lower is better`
+                              : "score unavailable"
+                          }`}
+                        >
+                          <span
+                            style={{
+                              width: `${relativeQuality * 100}%`,
+                            }}
+                          />
+                        </div>
+                        <small>
+                          {hasScore
+                            ? `Relative score ${factor.score.toFixed(2)} / 1 · lower is better`
+                            : "Relative score unavailable"}
+                        </small>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
 
               <div className="stats">
                 <div>
@@ -814,7 +1045,39 @@ const deadEnds = Array.isArray(data?.dead_ends)
 
                 <div>
                   <b>{fmtTraffic(recommendation.traffic)}</b>
-                  <small>{trafficLevel(recommendation.traffic)}</small>
+                  <small>
+                    {recommendation.traffic_is_live
+                      ? "Live traffic"
+                      : `${trafficLevel(recommendation.traffic)} · estimated`}
+                  </small>
+                </div>
+              </div>
+
+              <div
+                className={`traffic-status ${
+                  data.live_traffic_available
+                    ? "traffic-status-live"
+                    : "traffic-status-unavailable"
+                }`}
+                role="status"
+              >
+                <span className="traffic-status-dot" />
+                <div>
+                  <strong>
+                    {data.live_traffic_available
+                      ? "Live traffic · TomTom"
+                      : "Live traffic unavailable"}
+                  </strong>
+                  <small>
+                    {data.live_traffic_available
+                      ? `Updated ${formatTrafficUpdatedAt(
+                          data.traffic_updated_at
+                        ) || "just now"} · refreshes every minute`
+                      : data.traffic_refresh_error
+                        ? `Update failed: ${data.traffic_refresh_error}`
+                        : data.traffic_message ||
+                          "Showing estimated traffic only."}
+                  </small>
                 </div>
               </div>
 
@@ -880,7 +1143,10 @@ const deadEnds = Array.isArray(data?.dead_ends)
                           </div>
                           <div>
                             <span>Traffic</span>
-                            <strong>{fmtTraffic(route.traffic)}</strong>
+                            <strong>
+                              {fmtTraffic(route.traffic)}
+                              {route.traffic_is_live ? " · Live" : " · Est."}
+                            </strong>
                           </div>
                           <div>
                             <span>Risk</span>
@@ -933,77 +1199,118 @@ const deadEnds = Array.isArray(data?.dead_ends)
 
           <MapController bounds={bounds} fitSignal={fitSignal} />
 
-         {/* Display every candidate route independently. */}
-{routes.map((route, index) => {
-  if (route.coords.length < 2) return null;
+          {routes.map((route, index) => {
+            if (route.coords.length < 2) return null;
 
-  const isRecommended =
-    route.originalIndex === data?.best_index;
+            const isRecommended =
+              route.originalIndex === data?.best_index;
+            const routeColors = [
+              "#16a34a",
+              "#2563eb",
+              "#9333ea",
+              "#ea580c",
+              "#0891b2",
+              "#db2777",
+            ];
 
-  const routeColors = [
-    "#16a34a",
-    "#2563eb",
-    "#9333ea",
-    "#ea580c",
-    "#0891b2",
-    "#db2777",
-  ];
+            return (
+              <Polyline
+                key={`route-${route.originalIndex}`}
+                positions={route.coords}
+                pathOptions={{
+                  color: isRecommended
+                    ? "#16a34a"
+                    : routeColors[(index + 1) % routeColors.length],
+                  weight: isRecommended ? 7 : 5,
+                  opacity: isRecommended ? 1 : 0.8,
+                }}
+              >
+                <Tooltip sticky>
+                  {isRecommended
+                    ? "★ Recommended Route"
+                    : `Alternative Route ${index + 1}`}
+                  {" · "}
+                  {fmtDistance(route.distance_km)}
+                  {" · "}
+                  {fmtTime(route.eta_min)}
+                  {" · "}
+                  Traffic {fmtTraffic(route.traffic)}
+                </Tooltip>
+              </Polyline>
+            );
+          })}
 
-  return (
-    <Polyline
-      key={`route-${route.originalIndex}`}
-      positions={route.coords}
-      pathOptions={{
-        color: isRecommended
-          ? "#16a34a"
-          : routeColors[(index + 1) % routeColors.length],
-        weight: isRecommended ? 7 : 5,
-        opacity: isRecommended ? 1 : 0.8,
-      }}
-    >
-      <Tooltip sticky>
-        {isRecommended
-          ? "★ Recommended Route"
-          : `Alternative Route ${index + 1}`}
-        {" · "}
-        {fmtDistance(route.distance_km)}
-        {" · "}
-        {fmtTime(route.eta_min)}
-        {" · "}
-        Traffic {fmtTraffic(route.traffic)}
-      </Tooltip>
-    </Polyline>
-  );
-})}
+          {routes.flatMap((route) =>
+            route.live_traffic_segments
+              .filter(
+                (segment) =>
+                  Number(segment.traffic) >=
+                  MIN_TRAFFIC_OVERLAY_SLOWDOWN
+              )
+              .map((segment, index) => (
+                <Polyline
+                  key={`traffic-${route.originalIndex}-${index}`}
+                  positions={segment.coords}
+                  pathOptions={{
+                    color: Number(segment.traffic) >= 0.2
+                      ? "#b91c1c"
+                      : "#ef4444",
+                    weight: 12,
+                    opacity: 1,
+                    lineCap: "round",
+                    lineJoin: "round",
+                  }}
+                >
+                  <Tooltip sticky>
+                    Live congestion · {fmtTraffic(segment.traffic)}
+                    {segment.current_speed
+                      ? ` · ${Math.round(segment.current_speed)} km/h`
+                      : ""}
+                  </Tooltip>
+                </Polyline>
+              ))
+          )}
 
-{/* Display dead-end markers separately from route lines. */}
-{(data?.dead_ends ?? []).map((point, index) => {
-  const lat = Number(point.lat);
-  const lon = Number(point.lon);
+          {data && (
+            <div className="traffic-legend" aria-live="polite">
+              <strong>Traffic overlay</strong>
+              <span>
+                <i className="traffic-legend-line" />
+                Red marks live slowdowns
+              </span>
+              <small>
+                {data.live_traffic_available
+                  ? "Live speeds at least 8% below free flow · refreshes every minute"
+                  : "Live congestion overlay unavailable"}
+              </small>
+            </div>
+          )}
 
-  if (
-    !Number.isFinite(lat) ||
-    !Number.isFinite(lon) ||
-    lat < -90 ||
-    lat > 90 ||
-    lon < -180 ||
-    lon > 180
-  ) {
-    return null;
-  }
+          {(data?.dead_ends ?? []).map((point, index) => {
+            const lat = Number(point.lat);
+            const lon = Number(point.lon);
 
-  return (
-    <Marker
-      key={`dead-end-${index}`}
-      position={[lat, lon]}
-      icon={pin("!", "pin-dead-end")}
-    >
-      <Tooltip>
-        Possible road dead end
-      </Tooltip>
-    </Marker>
-  );
-})}
+            if (
+              !Number.isFinite(lat) ||
+              !Number.isFinite(lon) ||
+              lat < -90 ||
+              lat > 90 ||
+              lon < -180 ||
+              lon > 180
+            ) {
+              return null;
+            }
+
+            return (
+              <Marker
+                key={`dead-end-${index}`}
+                position={[lat, lon]}
+                icon={pin("!", "pin-dead-end")}
+              >
+                <Tooltip>Possible road dead end</Tooltip>
+              </Marker>
+            );
+          })}
         </MapContainer>
 
         <button
