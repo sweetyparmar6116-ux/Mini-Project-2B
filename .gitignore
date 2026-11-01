@@ -1,0 +1,11 @@
+.DS_Store
+.env
+**/.env
+**/__pycache__/
+*.py[cod]
+*.zip
+route-optimizer/backend/cache/
+route-optimizer/backend/*_backup.py
+route-optimizer/backend/*.phase1-backup
+route-optimizer/backend_backup/
+route-optimizer/frontend_backup/

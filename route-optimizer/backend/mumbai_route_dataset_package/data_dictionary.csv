@@ -1,0 +1,62 @@
+field,group,unit,provenance,depends_on_simulated_inputs,description
+edge_id,A road,text,DERIVED,False,Unique ID 'from|to|key' of the directed edge (matches the networkx edge).
+edge_key,A road,int,REAL_OSM,False,"OSM/networkx parallel-edge key (0,1,..). Parallel roads are kept, not merged."
+osm_way_id,A road,text,REAL_OSM,False,OSM way id(s); several ids joined by ';' if the edge merges ways. Blank if absent.
+from_node,A road,id,REAL_OSM,False,Start node id in the road graph.
+to_node,A road,id,REAL_OSM,False,End node id in the road graph.
+from_latitude,A road,deg,REAL_OSM,False,Start node latitude (WGS84).
+from_longitude,A road,deg,REAL_OSM,False,Start node longitude.
+to_latitude,A road,deg,REAL_OSM,False,End node latitude.
+to_longitude,A road,deg,REAL_OSM,False,End node longitude.
+road_name,A road,text,REAL_OSM,False,OSM name; blank = not named in OSM (not invented).
+road_type,A road,text,REAL_OSM,False,OSM 'highway' class of the segment (first value if several).
+oneway,A road,bool,REAL_OSM,False,True if the segment is one-way per OSM; blank if unknown. Direction = from_node->to_node.
+road_length_m,A road,m,REAL_OSM,False,"Length computed by OSMnx from OSM geometry (haversine fallback if missing, flagged)."
+distance_km,A road,km,DERIVED,False,road_length_m / 1000.
+speed_limit_kph,A road,km/h,REAL_OSM,False,OSM maxspeed converted to km/h. BLANK when OSM has none (NOT estimated here).
+road_quality_score,A road,0-1 (1=best),SIMULATED,False,Simulated from road class + seeded noise. OSM surface data was not used.
+geometry_wkt,A road,WKT,REAL_OSM,False,Real curve geometry if the graph has it; blank = straight line between the two nodes.
+base_travel_time_min,B time,min,DERIVED,True,"distance_km / free_flow_speed_kph x 60 (no traffic, no weather)."
+traffic_delay_min,B time,min,DERIVED,True,time with simulated congestion minus base time.
+weather_delay_min,B time,min,DERIVED,True,extra time caused by weather_speed_factor on top of traffic.
+estimated_travel_time_min,B time,min,DERIVED,True,base + traffic_delay + weather_delay. Use as default routing time.
+free_flow_speed_kph,B time,km/h,DERIVED,True,"(speed_limit if known else class default) x vehicle_speed_factor, clipped 5..120."
+free_flow_speed_source,B time,text,DERIVED,False,OSM_MAXSPEED or ESTIMATED_CLASS_DEFAULT.
+time_of_day,B time,text,SIMULATED,False,Scenario: morning_peak/off_peak/evening_peak/night.
+day_type,B time,text,SIMULATED,False,Scenario: weekday/weekend.
+scenario_timestamp,B time,ISO8601,SIMULATED,False,Fixed fictional timestamp for the scenario (not a real observation).
+travel_time_offpeak_clear_min,B time,min,DERIVED,True,"Same segment, weekday off-peak, clear weather (time-dependent routing)."
+travel_time_morning_peak_clear_min,B time,min,DERIVED,True,"Weekday morning peak, clear."
+travel_time_evening_peak_clear_min,B time,min,DERIVED,True,"Weekday evening peak, clear."
+travel_time_evening_peak_rainy_min,B time,min,DERIVED,True,"Weekday evening peak, rainy."
+traffic_level,C traffic,text,SIMULATED,False,"low <0.25, moderate <0.50, high <0.75, severe >=0.75 (on congestion_index)."
+congestion_index,C traffic,0-0.95,SIMULATED,False,"base busyness x time-of-day multiplier (+0.15 if incident), clipped. NOT live traffic."
+traffic_speed_kph,C traffic,km/h,DERIVED,True,free_flow x (1 - k x congestion_index); k depends on vehicle.
+incident_flag,C traffic,bool,SIMULATED,False,Simulated incident (probability rises with busyness). Not a real incident.
+road_closure_flag,C traffic,bool,SIMULATED,False,Simulated closure (p=0.3%). Routing code should skip these edges. Not a real closure.
+weather_condition,D weather,text,SIMULATED,False,clear/cloudy/rainy/heavy_rain scenario (city-wide).
+rainfall_mm_per_hour,D weather,mm/h,SIMULATED,False,Scenario rainfall with +-20% per-edge jitter.
+visibility_m,D weather,m,SIMULATED,False,Scenario visibility with +-15% jitter.
+weather_speed_factor,D weather,0-1,SIMULATED,False,"Speed multiplier: clear 1.00, cloudy .98, rainy .85, heavy_rain .65."
+accident_count_12m,E safety,count,UNKNOWN,False,ALWAYS BLANK: no official per-segment accident data was available.
+accident_risk_score,E safety,0-1 (1=riskiest),SIMULATED,False,Simulated: .55 x class risk + .25 x (1-quality) + .20 x noise.
+accident_prone_flag,E safety,bool,SIMULATED,True,True if accident_risk_score is in the top 10% of this dataset (simulated).
+road_safety_score,E safety,0-1 (1=safest),DERIVED,True,1 - accident_risk_score.
+fuel_type,F cost,text,SIMULATED,False,Fuel of the chosen vehicle profile (assumption).
+fuel_efficiency_km_per_litre,F cost,km/l,DERIVED,True,Effective: vehicle nominal km/l x (1 - 0.25 x congestion_index).
+fuel_price_inr_per_litre,F cost,INR/l,REAL_EXTERNAL_SOURCE,False,Mumbai petrol 111.21 / diesel 97.83 INR/l (news reports mid-Oct 2026; verify with oil companies).
+estimated_fuel_litres,F cost,litre,DERIVED,True,distance_km / fuel_efficiency_km_per_litre.
+estimated_fuel_cost_inr,F cost,INR,DERIVED,True,estimated_fuel_litres x fuel_price_inr_per_litre.
+toll_cost_inr,F cost,INR,UNKNOWN,False,ALWAYS BLANK: no verified toll data. Blank is NOT zero.
+total_segment_cost_inr,F cost,INR,DERIVED,True,Equals fuel cost ONLY (toll unknown) - see total_cost_basis.
+total_cost_basis,F cost,text,DERIVED,False,FUEL_ONLY_TOLL_UNKNOWN.
+vehicle_type,G vehicle,text,SIMULATED,False,Vehicle profile used for this file.
+vehicle_capacity_kg,G vehicle,kg,SIMULATED,False,Assumed payload capacity of the profile.
+vehicle_speed_factor,G vehicle,0-1,SIMULATED,False,Assumed speed multiplier vs. free flow.
+vehicle_fuel_efficiency_km_per_litre,G vehicle,km/l,SIMULATED,False,Assumed nominal efficiency (before congestion).
+vehicle_access_allowed,G vehicle,text,REAL_OSM,False,FALSE if OSM access=no/private; otherwise UNKNOWN (no restriction facts were invented).
+vehicle_access_source,G vehicle,text,REAL_OSM,False,"REAL_OSM when access tag exists, else UNKNOWN."
+vehicle_scenario_id,G vehicle,text,DERIVED,False,VS-<vehicle>-<day>-<time>-<weather>.
+data_quality_flag,H quality,text,DERIVED,False,"OK or ';'-joined codes: SPEED_LIMIT_ESTIMATED, NAME_MISSING, ONEWAY_UNKNOWN, LENGTH_RECOMPUTED, ACCESS_RESTRICTED."
+data_quality_level,H quality,text,DERIVED,False,COMPLETE (no codes) or PARTIAL.
+simulation_seed,H quality,int,DERIVED,False,Seed used for all SIMULATED values.

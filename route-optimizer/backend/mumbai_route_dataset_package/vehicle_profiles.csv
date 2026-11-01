@@ -1,0 +1,6 @@
+vehicle_type,fuel_type,nominal_km_per_litre,speed_factor,capacity_kg,congestion_sensitivity_k,data_type
+motorcycle,petrol,45.0,1.0,150,0.6,SIMULATED_ASSUMPTION
+car,petrol,15.0,1.0,400,0.75,SIMULATED_ASSUMPTION
+taxi,diesel,16.0,1.0,400,0.75,SIMULATED_ASSUMPTION
+lcv,diesel,12.0,0.9,1000,0.8,SIMULATED_ASSUMPTION
+heavy,diesel,4.5,0.75,9000,0.85,SIMULATED_ASSUMPTION
